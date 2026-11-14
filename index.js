@@ -464,7 +464,7 @@ async function requestImagesFromLocalDream(prompt) {
     const seed = seedText ? Number(seedText) : null;
 
     const body = {
-        prompt: renderPrompt(settings.promptTemplate, prompt),
+        prompt: String(prompt || "").trim(),
         negative_prompt: String(settings.localDreamNegativePrompt || ""),
         steps: Number(settings.localDreamSteps) || defaultSettings.localDreamSteps,
         cfg: Number(settings.localDreamCfg) || defaultSettings.localDreamCfg,
