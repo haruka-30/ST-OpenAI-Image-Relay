@@ -28,11 +28,25 @@
         </select>
 
         <div id="oair_localdream_only" style="display:none;">
-            <label style="display:block; font-size:0.75em; opacity:0.8; margin-top:8px;">Local Dream 控制地址</label>
-            <input id="oair_localdream_url" class="text_pole" style="width:100%; box-sizing:border-box;" placeholder="http://127.0.0.1:8808">
+            <label style="display:block; font-size:0.75em; opacity:0.8; margin-top:8px;">Local Dream 控制地址（状态 API，默认 8808）</label>
+            <input id="oair_localdream_url" class="text_pole" style="width:100%; box-sizing:border-box;" placeholder="http://192.168.1.10:8808">
             <div style="margin-top:4px; font-size:0.75em; opacity:0.7;">
                 只检查设备是否在线。请在 Local Dream 设备上选择并加载模型，插件不会远程切换模型。
             </div>
+
+            <label style="display:block; font-size:0.75em; opacity:0.8; margin-top:6px;">生图地址（原生后端，留空自动推导）</label>
+            <input id="oair_localdream_generation_url" class="text_pole" style="width:100%; box-sizing:border-box;" placeholder="留空 = 同主机 :8081">
+            <div style="margin-top:4px; font-size:0.75em; opacity:0.7;">
+                生成端口一直带通配 CORS，浏览器可以直连；控制端口在部分设备版本上不带 CORS，所以两者分开处理。
+            </div>
+
+            <label style="display:block; font-size:0.75em; opacity:0.8; margin-top:6px;">请求通道</label>
+            <select id="oair_localdream_proxy_mode" class="text_pole" style="width:100%; box-sizing:border-box;">
+                <option value="auto">自动（直连优先，失败再走酒馆转发）</option>
+                <option value="direct">仅直连</option>
+                <option value="proxy">仅走酒馆转发 /proxy/（需 enableCorsProxy: true）</option>
+            </select>
+
             <div style="display:flex; gap:6px; margin-top:6px;">
                 <button id="oair_btn_localdream_check" class="menu_button" style="flex:1; justify-content:center;">检查在线状态</button>
             </div>
@@ -44,15 +58,15 @@
                 </div>
                 <div>
                     <label style="display:block; font-size:0.75em; opacity:0.8;">CFG</label>
-                    <input id="oair_localdream_cfg" type="number" min="1" step="0.1" class="text_pole" style="width:100%; box-sizing:border-box;">
+                    <input id="oair_localdream_cfg" type="number" min="0" step="0.1" class="text_pole" style="width:100%; box-sizing:border-box;">
                 </div>
                 <div>
-                    <label style="display:block; font-size:0.75em; opacity:0.8;">宽</label>
-                    <input id="oair_localdream_width" type="number" min="64" step="8" class="text_pole" style="width:100%; box-sizing:border-box;">
+                    <label style="display:block; font-size:0.75em; opacity:0.8;">宽（0 = 跟随设备）</label>
+                    <input id="oair_localdream_width" type="number" min="0" step="8" class="text_pole" style="width:100%; box-sizing:border-box;" placeholder="0">
                 </div>
                 <div>
-                    <label style="display:block; font-size:0.75em; opacity:0.8;">高</label>
-                    <input id="oair_localdream_height" type="number" min="64" step="8" class="text_pole" style="width:100%; box-sizing:border-box;">
+                    <label style="display:block; font-size:0.75em; opacity:0.8;">高（0 = 跟随设备）</label>
+                    <input id="oair_localdream_height" type="number" min="0" step="8" class="text_pole" style="width:100%; box-sizing:border-box;" placeholder="0">
                 </div>
             </div>
 

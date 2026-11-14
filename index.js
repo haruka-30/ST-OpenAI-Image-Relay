@@ -2,6 +2,7 @@ import { extension_settings, getContext } from "../../../extensions.js";
 import {
     eventSource,
     event_types,
+    getRequestHeaders,
     saveSettingsDebounced,
     updateMessageBlock,
     setExtensionPrompt,
@@ -42,11 +43,13 @@ const defaultSettings = {
     apiKey: "sk-any",
     model: "any",
     localDreamUrl: "http://127.0.0.1:8808",
+    localDreamGenerationUrl: "",
+    localDreamProxyMode: "auto",
     localDreamNegativePrompt: "",
     localDreamSteps: 20,
     localDreamCfg: 7.5,
-    localDreamWidth: 512,
-    localDreamHeight: 512,
+    localDreamWidth: 0,
+    localDreamHeight: 0,
     localDreamSeed: "",
     localDreamScheduler: "dpm",
     timeoutMs: 120000,
@@ -126,14 +129,18 @@ function bindUiEvents() {
     bindSettingInput("#oair_api_key", "apiKey", () => $("#oair_api_key").val());
     bindSettingInput("#oair_model", "model", () => $("#oair_model").val());
     bindSettingInput("#oair_localdream_url", "localDreamUrl", () => $("#oair_localdream_url").val());
+    bindSettingInput("#oair_localdream_generation_url", "localDreamGenerationUrl", () => $("#oair_localdream_generation_url").val());
+    bindSettingInput("#oair_localdream_proxy_mode", "localDreamProxyMode", () => $("#oair_localdream_proxy_mode").val());
     bindSettingInput("#oair_localdream_negative_prompt", "localDreamNegativePrompt", () => $("#oair_localdream_negative_prompt").val());
     bindSettingInput("#oair_localdream_steps", "localDreamSteps", () => Number($("#oair_localdream_steps").val()) || defaultSettings.localDreamSteps);
     bindSettingInput("#oair_localdream_cfg", "localDreamCfg", () => Number($("#oair_localdream_cfg").val()) || defaultSettings.localDreamCfg);
-    bindSettingInput("#oair_localdream_width", "localDreamWidth", () => Number($("#oair_localdream_width").val()) || defaultSettings.localDreamWidth);
-    bindSettingInput("#oair_localdream_height", "localDreamHeight", () => Number($("#oair_localdream_height").val()) || defaultSettings.localDreamHeight);
+    bindSettingInput("#oair_localdream_width", "localDreamWidth", () => Math.max(0, Number($("#oair_localdream_width").val()) || 0));
+    bindSettingInput("#oair_localdream_height", "localDreamHeight", () => Math.max(0, Number($("#oair_localdream_height").val()) || 0));
     bindSettingInput("#oair_localdream_seed", "localDreamSeed", () => $("#oair_localdream_seed").val());
     bindSettingInput("#oair_localdream_scheduler", "localDreamScheduler", () => $("#oair_localdream_scheduler").val());
     $("#oair_backend_mode").on("input", updateBackendModeUi);
+    $("#oair_localdream_proxy_mode, #oair_localdream_url, #oair_localdream_generation_url")
+        .on("input", () => { localDreamProxySupport = null; });
     bindSettingInput("#oair_timeout_ms", "timeoutMs", () => Number($("#oair_timeout_ms").val()) || defaultSettings.timeoutMs);
     bindSettingInput("#oair_prompt_template", "promptTemplate", () => $("#oair_prompt_template").val());
     bindSettingInput("#oair_extraction_regex", "extractionRegex", () => $("#oair_extraction_regex").val());
@@ -175,11 +182,13 @@ function updateSettingsUi() {
     $("#oair_api_key").val(settings.apiKey || "");
     $("#oair_model").val(settings.model || "");
     $("#oair_localdream_url").val(settings.localDreamUrl || "");
+    $("#oair_localdream_generation_url").val(settings.localDreamGenerationUrl || "");
+    $("#oair_localdream_proxy_mode").val(settings.localDreamProxyMode || defaultSettings.localDreamProxyMode);
     $("#oair_localdream_negative_prompt").val(settings.localDreamNegativePrompt || "");
     $("#oair_localdream_steps").val(Number(settings.localDreamSteps) || defaultSettings.localDreamSteps);
     $("#oair_localdream_cfg").val(Number(settings.localDreamCfg) || defaultSettings.localDreamCfg);
-    $("#oair_localdream_width").val(Number(settings.localDreamWidth) || defaultSettings.localDreamWidth);
-    $("#oair_localdream_height").val(Number(settings.localDreamHeight) || defaultSettings.localDreamHeight);
+    $("#oair_localdream_width").val(Number(settings.localDreamWidth) || 0);
+    $("#oair_localdream_height").val(Number(settings.localDreamHeight) || 0);
     $("#oair_localdream_seed").val(settings.localDreamSeed || "");
     $("#oair_localdream_scheduler").val(settings.localDreamScheduler || "");
     $("#oair_timeout_ms").val(Number(settings.timeoutMs) || defaultSettings.timeoutMs);
@@ -419,17 +428,21 @@ async function requestImagesFromBackend(prompt) {
 async function runLocalDreamCheck() {
     try {
         setStatus("正在检查 Local Dream...", "info");
-        const status = await checkLocalDreamStatus();
-        const deviceName = status.deviceName || "未知设备";
-        const state = status.status?.state || "unknown";
-        if (state !== "running") {
-            setStatus(`Local Dream 在线，模型未运行（${state}）`, "warning");
-            toastr.warning("Local Dream 在线，请先在设备上加载模型。");
+        const probe = await checkLocalDreamStatus();
+        const summary = describeLocalDreamProbe(probe);
+
+        if (probe.ready) {
+            setStatus(summary.text, "success");
+            toastr.success(summary.text);
             return;
         }
 
-        setStatus(`Local Dream 已就绪：${deviceName}`, "success");
-        toastr.success(`Local Dream 已就绪：${deviceName}`);
+        setStatus(summary.text, summary.kind);
+        if (summary.kind === "warning") {
+            toastr.warning(summary.text);
+        } else {
+            toastr.error(summary.text);
+        }
     } catch (error) {
         console.error(`[${extensionName}] Local Dream check failed`, error);
         setStatus(error.message, "error");
@@ -437,48 +450,145 @@ async function runLocalDreamCheck() {
     }
 }
 
-async function checkLocalDreamStatus() {
-    const settings = extension_settings[extensionName];
-    const baseUrl = resolveLocalDreamBaseUrl(settings.localDreamUrl);
-    const info = await requestJson(`${baseUrl}/info`, { method: "GET" }, 5000);
-    if (info?.app !== "localdream") {
-        throw new Error("目标端口不是 Local Dream 设备互联服务。");
+function describeLocalDreamProbe(probe) {
+    const deviceName = probe.deviceName || "Local Dream 设备";
+    const modelText = probe.modelId ? ` / 模型 ${probe.modelId}` : "";
+    const sizeText = probe.width && probe.height ? ` / ${probe.width}×${probe.height}` : "";
+
+    if (probe.controlReachable) {
+        if (probe.state === "running") {
+            if (probe.generationReachable) {
+                return { ready: true, kind: "success", text: `Local Dream 已就绪：${deviceName}${modelText}${sizeText}` };
+            }
+            return { ready: false, kind: "warning", text: `模型已加载（${deviceName}${modelText}），但生成端口 ${probe.generationBase} 不可达。` };
+        }
+        if (probe.state === "starting") {
+            return { ready: false, kind: "warning", text: `Local Dream 正在加载模型（${deviceName}${modelText}），请稍候再试。` };
+        }
+        if (probe.state === "error") {
+            const detail = probe.message ? `：${probe.message}` : "";
+            return { ready: false, kind: "error", text: `Local Dream 后端异常（${probe.state}）${detail}` };
+        }
+        return { ready: false, kind: "warning", text: `Local Dream 在线（${deviceName}），设备端尚未加载模型（${probe.state}）。` };
     }
 
-    const status = await requestJson(`${baseUrl}/status`, { method: "GET" }, 5000);
+    // 控制端口不可读（常见于设备未开放 CORS 时），退化为只看生成端口。
+    if (probe.generationReachable) {
+        return {
+            ready: true,
+            kind: "success",
+            text: `Local Dream 生成端口在线：${probe.generationBase}（控制端口 ${probe.controlBase} 不可跨域读取，已跳过状态校验）`,
+        };
+    }
+
     return {
-        info,
-        status,
-        deviceName: info.device,
+        ready: false,
+        kind: "error",
+        text: `Local Dream 不可达：控制端口 ${probe.controlBase} 与生成端口 ${probe.generationBase} 都没有响应。${probe.lastError ? `（${probe.lastError}）` : ""}`,
     };
 }
 
-async function requestImagesFromLocalDream(prompt) {
-    await checkLocalDreamStatus();
-
+async function checkLocalDreamStatus() {
     const settings = extension_settings[extensionName];
-    const baseUrl = resolveLocalDreamBaseUrl(settings.localDreamUrl);
-    const controlUrl = new URL(baseUrl);
-    const generationUrl = `${controlUrl.protocol}//${controlUrl.host.replace(/:\d+$/, "")}:8081/generate`;
+    const endpoints = resolveLocalDreamEndpoints(settings.localDreamUrl, settings.localDreamGenerationUrl);
+    const probe = {
+        controlBase: endpoints.controlBase,
+        generationBase: endpoints.generationBase,
+        controlReachable: false,
+        generationReachable: false,
+        info: null,
+        status: null,
+        deviceName: "",
+        modelId: "",
+        message: "",
+        state: "unknown",
+        width: 0,
+        height: 0,
+        lastError: "",
+    };
+
+    try {
+        const info = await localDreamJson(`${endpoints.controlBase}/info`, 5000);
+        if (!info || info.app !== "localdream") {
+            throw new Error("目标端口不是 Local Dream 设备互联服务。");
+        }
+        probe.info = info;
+        probe.controlReachable = true;
+        probe.deviceName = String(info.device || "").trim();
+
+        const status = await localDreamJson(`${endpoints.controlBase}/status`, 5000);
+        probe.status = status;
+        probe.state = String(status?.state || "unknown");
+        probe.modelId = String(status?.serving_model_id || "").trim();
+        probe.message = String(status?.message || "").trim();
+        probe.width = Number(status?.width) || 0;
+        probe.height = Number(status?.height) || 0;
+    } catch (error) {
+        probe.controlError = error?.message || String(error);
+        probe.lastError = probe.controlError;
+    }
+
+    try {
+        await localDreamFetch(`${endpoints.generationBase}/health`, { method: "GET" }, 5000);
+        probe.generationReachable = true;
+    } catch (error) {
+        probe.generationError = error?.message || String(error);
+        probe.lastError = probe.lastError || probe.generationError;
+    }
+
+    probe.ready = probe.controlReachable
+        ? probe.state === "running"
+        : probe.generationReachable;
+
+    return probe;
+}
+
+async function requestImagesFromLocalDream(prompt) {
+    const settings = extension_settings[extensionName];
+    const endpoints = resolveLocalDreamEndpoints(settings.localDreamUrl, settings.localDreamGenerationUrl);
+    const probe = await checkLocalDreamStatus();
+
+    // 只有“明确读到 running 之外的状态”才算设备未就绪；控制端口读不到不阻断生图。
+    if (probe.controlReachable && probe.state !== "running") {
+        const detail = probe.message ? `：${probe.message}` : "";
+        throw new Error(`Local Dream 设备端未就绪（${probe.state}）${detail}。请在手机上加载模型后重试。`);
+    }
+
+    if (!probe.generationReachable) {
+        throw new Error(
+            `Local Dream 生成端口不可达：${endpoints.generationBase}。` +
+            `请确认设备已加载模型、已开启设备互联，且局域网可以访问该地址。`,
+        );
+    }
+
     const seedText = String(settings.localDreamSeed || "").trim();
     const seed = seedText ? Number(seedText) : null;
-
     const body = {
         prompt: String(prompt || "").trim(),
         negative_prompt: String(settings.localDreamNegativePrompt || ""),
         steps: Number(settings.localDreamSteps) || defaultSettings.localDreamSteps,
         cfg: Number(settings.localDreamCfg) || defaultSettings.localDreamCfg,
         scheduler: String(settings.localDreamScheduler || "dpm"),
-        width: Number(settings.localDreamWidth) || defaultSettings.localDreamWidth,
-        height: Number(settings.localDreamHeight) || defaultSettings.localDreamHeight,
         output_format: "jpeg",
     };
+
+    // 宽高：手填优先 → 其次是设备 /status 报告的运行分辨率 → 都不确定就不发，让后端按自身配置决定。
+    const width = Number(settings.localDreamWidth) || 0;
+    const height = Number(settings.localDreamHeight) || 0;
+    if (width > 0 && height > 0) {
+        body.width = width;
+        body.height = height;
+    } else if (probe.width > 0 && probe.height > 0) {
+        body.width = probe.width;
+        body.height = probe.height;
+    }
 
     if (Number.isFinite(seed) && seed !== null) {
         body.seed = Math.trunc(seed);
     }
 
-    const completeEvent = await requestLocalDreamGeneration(generationUrl, body);
+    setStatus(`Local Dream 生成中：${probe.modelId || probe.deviceName || "设备"}...`, "info");
+    const completeEvent = await requestLocalDreamGeneration(`${endpoints.generationBase}/generate`, body);
     const dataUrl = normalizeLocalDreamImage(completeEvent);
     if (!dataUrl) {
         throw new Error("Local Dream 返回结果中没有图片。");
@@ -492,82 +602,115 @@ async function requestImagesFromLocalDream(prompt) {
 }
 
 async function requestLocalDreamGeneration(url, body) {
-    const controller = new AbortController();
-    const timeoutMs = Number(extension_settings[extensionName].timeoutMs) || defaultSettings.timeoutMs;
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let completeEvent;
+    const candidates = localDreamUrlCandidates(url);
+    let lastError;
+    let directError;
 
-    try {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-            signal: controller.signal,
-        });
+    for (const candidate of candidates) {
+        const controller = new AbortController();
+        const timeoutMs = Number(extension_settings[extensionName].timeoutMs) || defaultSettings.timeoutMs;
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-        const errorText = async () => (await response.text())?.trim();
-        if (!response.ok) {
-            throw new Error(`Local Dream 生成请求失败：${await errorText() || `HTTP ${response.status}`}`);
-        }
+        try {
+            const response = await fetch(candidate.url, {
+                method: "POST",
+                headers: candidate.isProxy
+                    ? { ...getRequestHeaders(), "Content-Type": "application/json" }
+                    : { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+                signal: controller.signal,
+            });
 
-        const reader = response.body?.getReader();
-        if (!reader) {
-            throw new Error("浏览器无法读取 Local Dream 的 SSE 响应。");
-        }
-
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let streamingError = "";
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-                break;
+            if (!response.ok) {
+                const errorText = (await response.text())?.trim();
+                const message = `Local Dream 生成请求失败：${errorText || `HTTP ${response.status}`}`;
+                lastError = new Error(message);
+                if (candidate.isProxy) {
+                    if (isLocalDreamProxyUnavailable(errorText, response.status)) {
+                        localDreamProxySupport = false;
+                    }
+                    throw directError || lastError;
+                }
+                directError = directError || lastError;
+                continue;
             }
 
-            buffer += decoder.decode(value, { stream: true });
-            const events = buffer.split(/\r?\n\r?\n/);
-            buffer = events.pop() || "";
-
-            for (const event of events) {
-                const dataLines = event.split(/\r?\n/)
-                    .filter((line) => line.startsWith("data:"))
-                    .map((line) => line.slice(5).trim());
-                if (!dataLines.length) {
-                    continue;
-                }
-
-                let payload;
-                try {
-                    payload = JSON.parse(dataLines.join("\n"));
-                } catch {
-                    continue;
-                }
-
-                if (payload.type === "complete") {
-                    completeEvent = payload;
-                } else if (payload.type === "progress" && payload.total_steps) {
-                    setStatus(`Local Dream 生成中 ${payload.step}/${payload.total_steps}`, "info");
-                } else if (payload.type === "error") {
-                    streamingError = payload.message || "Local Dream 生成失败。";
-                }
+            if (candidate.isProxy) {
+                localDreamProxySupport = true;
             }
-        }
 
-        if (streamingError) {
-            throw new Error(streamingError);
+            const completeEvent = await consumeLocalDreamStream(response);
+            return completeEvent;
+        } catch (error) {
+            lastError = error?.name === "AbortError" ? new Error("Local Dream 生成超时。") : error;
+            if (candidate.isProxy) {
+                if (isLocalDreamProxyUnavailable(lastError?.message, 0)) {
+                    localDreamProxySupport = false;
+                }
+                throw directError || lastError;
+            }
+            directError = directError || lastError;
+        } finally {
+            clearTimeout(timer);
         }
-        if (!completeEvent) {
-            throw new Error("Local Dream 响应在完成前结束。");
-        }
-        return completeEvent;
-    } catch (error) {
-        if (error?.name === "AbortError") {
-            throw new Error("Local Dream 生成超时。");
-        }
-        throw error;
-    } finally {
-        clearTimeout(timer);
     }
+
+    throw lastError || new Error("Local Dream 生成请求失败。");
+}
+
+async function consumeLocalDreamStream(response) {
+    const reader = response.body?.getReader();
+    if (!reader) {
+        throw new Error("浏览器无法读取 Local Dream 的 SSE 响应。");
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let completeEvent = null;
+    let streamingError = "";
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+            break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split(/\r?\n\r?\n/);
+        buffer = events.pop() || "";
+
+        for (const event of events) {
+            const dataLines = event.split(/\r?\n/)
+                .filter((line) => line.startsWith("data:"))
+                .map((line) => line.slice(5).trim());
+            if (!dataLines.length) {
+                continue;
+            }
+
+            let payload;
+            try {
+                payload = JSON.parse(dataLines.join("\n"));
+            } catch {
+                continue;
+            }
+
+            if (payload.type === "complete") {
+                completeEvent = payload;
+            } else if (payload.type === "progress" && payload.total_steps) {
+                setStatus(`Local Dream 生成中 ${payload.step}/${payload.total_steps}`, "info");
+            } else if (payload.type === "error") {
+                streamingError = payload.message || "Local Dream 生成失败。";
+            }
+        }
+    }
+
+    if (streamingError) {
+        throw new Error(streamingError);
+    }
+    if (!completeEvent) {
+        throw new Error("Local Dream 响应在完成前结束。");
+    }
+    return completeEvent;
 }
 
 function normalizeLocalDreamImage(event) {
@@ -605,12 +748,111 @@ function resolveLocalDreamBaseUrl(rawUrl) {
     }
 }
 
-async function requestJson(url, options = {}, timeoutMs = 5000) {
-    const text = await fetchWithTimeout(url, options, timeoutMs);
+// 控制端口（状态 API）和生成端口（原生后端）是两个独立服务：
+// 控制端口在部分设备/版本上不返回 CORS 头，浏览器直连会被拦截；生成端口一直带通配 CORS。
+// 因此控制地址只用来推导主机，生成地址可以单独指定。
+function resolveLocalDreamEndpoints(controlUrl, generationUrl) {
+    const controlBase = resolveLocalDreamBaseUrl(controlUrl);
+    const explicitGeneration = String(generationUrl || "").trim();
+
+    if (explicitGeneration) {
+        const generationBase = resolveLocalDreamBaseUrl(explicitGeneration);
+        return { controlBase, generationBase };
+    }
+
+    const url = new URL(controlBase);
+    return {
+        controlBase,
+        generationBase: `${url.protocol}//${url.hostname}:8081`,
+    };
+}
+
+// SillyTavern 自带 /proxy/<url> 服务端转发。默认关闭，开启后可以绕开控制端口的 CORS 限制。
+// 探测结果缓存，避免每次请求都多打一发 404。
+let localDreamProxySupport = null;
+
+function isLocalDreamProxyUnavailable(text, status) {
+    const message = String(text || "");
+    return status === 404
+        || /CORS proxy is disabled/i.test(message)
+        || /Cannot (GET|POST)/i.test(message);
+}
+
+function localDreamUrlCandidates(absoluteUrl) {
+    const mode = String(extension_settings[extensionName]?.localDreamProxyMode || "auto");
+    const candidates = [];
+
+    if (mode !== "proxy") {
+        candidates.push({ url: absoluteUrl, isProxy: false });
+    }
+
+    if (mode !== "direct" && localDreamProxySupport !== false) {
+        candidates.push({ url: `/proxy/${absoluteUrl}`, isProxy: true });
+    }
+
+    return candidates.length ? candidates : [{ url: absoluteUrl, isProxy: false }];
+}
+
+async function localDreamFetch(url, options = {}, timeoutMs = 5000) {
+    let lastError;
+    let directError;
+
+    for (const candidate of localDreamUrlCandidates(url)) {
+        try {
+            const response = await fetch(candidate.url, {
+                ...options,
+                headers: candidate.isProxy ? { ...getRequestHeaders(), ...(options.headers || {}) } : options.headers,
+            });
+
+            if (!response.ok) {
+                const text = (await response.text())?.trim();
+                lastError = new Error(`Local Dream 请求失败：${text || `HTTP ${response.status}`}`);
+                if (candidate.isProxy) {
+                    if (isLocalDreamProxyUnavailable(text, response.status)) {
+                        localDreamProxySupport = false;
+                    }
+                    throw directError || lastError;
+                }
+                directError = directError || lastError;
+                continue;
+            }
+
+            if (candidate.isProxy) {
+                localDreamProxySupport = true;
+            }
+
+            return response;
+        } catch (error) {
+            lastError = error?.name === "AbortError" ? new Error("Local Dream 请求超时。") : error;
+            if (candidate.isProxy) {
+                throw directError || lastError;
+            }
+            directError = directError || lastError;
+        }
+    }
+
+    throw directError || lastError || new Error("Local Dream 请求失败。");
+}
+
+async function localDreamJson(url, timeoutMs = 5000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
-        return JSON.parse(text);
-    } catch {
-        throw new Error("Local Dream 返回了无效 JSON。");
+        const response = await localDreamFetch(url, { method: "GET", signal: controller.signal }, timeoutMs);
+        const text = await response.text();
+        try {
+            return JSON.parse(text);
+        } catch {
+            throw new Error("Local Dream 返回了无效 JSON。");
+        }
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            throw new Error("Local Dream 请求超时。");
+        }
+        throw error;
+    } finally {
+        clearTimeout(timer);
     }
 }
 
