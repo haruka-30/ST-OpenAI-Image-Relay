@@ -18,6 +18,22 @@ API 密钥： sk-any
 
 该配置匹配 https://github.com/lumingya/universal-web-api 的本地后端，但该扩展也支持其他任何兼容 OpenAI 接口规范的服务。
 
+## Local Dream 设备互联
+
+在“图片后端配置”中将“后端类型”切换为 `Local Dream 设备互联`，然后把“Local Dream 控制地址”填成设备互联控制端口：
+
+```text
+http://127.0.0.1:8808
+```
+
+局域网设备则填对应手机或平板的 IP，例如 `http://192.168.1.20:8808`。插件只会：
+
+1. 读取 `GET /info` 确认这是 Local Dream 设备互联端；
+2. 读取 `GET /status` 确认后端状态为 `running`；
+3. 向同一设备的 `8081` 端口 `POST /generate` 发送生图请求。
+
+插件不会请求 `/models`、`/select`，也不会拉取或远程切换模型。请先在 Local Dream 设备上选择并加载模型，模型进入运行状态后再使用测试或聊天生图。
+
 重要设置项
 
 服务 URL (Service URL)： 接收完整的 .../chat/completions 链接，或者像 .../v1 这样的基础路径。

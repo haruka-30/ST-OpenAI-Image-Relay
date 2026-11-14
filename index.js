@@ -37,9 +37,18 @@ const DEFAULT_MAIN_PROMPT = [
 const defaultSettings = {
     enabled: true,
     mainPrompt: DEFAULT_MAIN_PROMPT,
+    backendMode: "openai",
     serviceUrl: "http://127.0.0.1:8199/v1/chat/completions",
     apiKey: "sk-any",
     model: "any",
+    localDreamUrl: "http://127.0.0.1:8808",
+    localDreamNegativePrompt: "",
+    localDreamSteps: 20,
+    localDreamCfg: 7.5,
+    localDreamWidth: 512,
+    localDreamHeight: 512,
+    localDreamSeed: "",
+    localDreamScheduler: "dpm",
     timeoutMs: 120000,
     promptTemplate: "请根据以下提示词生成图片，并且只返回最终图片。\n\n{{prompt}}",
     extractionRegex: '/<pic[^>]*\\sprompt="([^"]+)"[^>]*>/g',
@@ -112,9 +121,19 @@ function bindUiEvents() {
 
     bindSettingInput("#oair_enabled", "enabled", () => $("#oair_enabled").prop("checked"));
     bindSettingInput("#oair_main_prompt", "mainPrompt", () => $("#oair_main_prompt").val());
+    bindSettingInput("#oair_backend_mode", "backendMode", () => $("#oair_backend_mode").val());
     bindSettingInput("#oair_service_url", "serviceUrl", () => $("#oair_service_url").val());
     bindSettingInput("#oair_api_key", "apiKey", () => $("#oair_api_key").val());
     bindSettingInput("#oair_model", "model", () => $("#oair_model").val());
+    bindSettingInput("#oair_localdream_url", "localDreamUrl", () => $("#oair_localdream_url").val());
+    bindSettingInput("#oair_localdream_negative_prompt", "localDreamNegativePrompt", () => $("#oair_localdream_negative_prompt").val());
+    bindSettingInput("#oair_localdream_steps", "localDreamSteps", () => Number($("#oair_localdream_steps").val()) || defaultSettings.localDreamSteps);
+    bindSettingInput("#oair_localdream_cfg", "localDreamCfg", () => Number($("#oair_localdream_cfg").val()) || defaultSettings.localDreamCfg);
+    bindSettingInput("#oair_localdream_width", "localDreamWidth", () => Number($("#oair_localdream_width").val()) || defaultSettings.localDreamWidth);
+    bindSettingInput("#oair_localdream_height", "localDreamHeight", () => Number($("#oair_localdream_height").val()) || defaultSettings.localDreamHeight);
+    bindSettingInput("#oair_localdream_seed", "localDreamSeed", () => $("#oair_localdream_seed").val());
+    bindSettingInput("#oair_localdream_scheduler", "localDreamScheduler", () => $("#oair_localdream_scheduler").val());
+    $("#oair_backend_mode").on("input", updateBackendModeUi);
     bindSettingInput("#oair_timeout_ms", "timeoutMs", () => Number($("#oair_timeout_ms").val()) || defaultSettings.timeoutMs);
     bindSettingInput("#oair_prompt_template", "promptTemplate", () => $("#oair_prompt_template").val());
     bindSettingInput("#oair_extraction_regex", "extractionRegex", () => $("#oair_extraction_regex").val());
@@ -131,6 +150,11 @@ function bindUiEvents() {
         renderPreview([], "");
         setStatus("预览已清空");
     });
+
+    $("#oair_btn_localdream_check").off("click").on("click", async (event) => {
+        event.preventDefault();
+        await runLocalDreamCheck();
+    });
 }
 
 function bindSettingInput(selector, key, getter) {
@@ -146,14 +170,30 @@ function updateSettingsUi() {
     const settings = extension_settings[extensionName];
     $("#oair_enabled").prop("checked", !!settings.enabled);
     $("#oair_main_prompt").val(settings.mainPrompt || "");
+    $("#oair_backend_mode").val(settings.backendMode || defaultSettings.backendMode);
     $("#oair_service_url").val(settings.serviceUrl || "");
     $("#oair_api_key").val(settings.apiKey || "");
     $("#oair_model").val(settings.model || "");
+    $("#oair_localdream_url").val(settings.localDreamUrl || "");
+    $("#oair_localdream_negative_prompt").val(settings.localDreamNegativePrompt || "");
+    $("#oair_localdream_steps").val(Number(settings.localDreamSteps) || defaultSettings.localDreamSteps);
+    $("#oair_localdream_cfg").val(Number(settings.localDreamCfg) || defaultSettings.localDreamCfg);
+    $("#oair_localdream_width").val(Number(settings.localDreamWidth) || defaultSettings.localDreamWidth);
+    $("#oair_localdream_height").val(Number(settings.localDreamHeight) || defaultSettings.localDreamHeight);
+    $("#oair_localdream_seed").val(settings.localDreamSeed || "");
+    $("#oair_localdream_scheduler").val(settings.localDreamScheduler || "");
     $("#oair_timeout_ms").val(Number(settings.timeoutMs) || defaultSettings.timeoutMs);
     $("#oair_prompt_template").val(settings.promptTemplate || "");
     $("#oair_extraction_regex").val(settings.extractionRegex || "");
     $("#oair_response_image_regex").val(settings.responseImageRegex || "");
     $("#oair_extra_body").val(settings.extraBody || "");
+    updateBackendModeUi();
+}
+
+function updateBackendModeUi() {
+    const mode = extension_settings[extensionName].backendMode || defaultSettings.backendMode;
+    $("#oair_openai_only").toggle(mode === "openai");
+    $("#oair_localdream_only").toggle(mode === "localdream");
 }
 
 function applyMainPromptInjection() {
@@ -331,6 +371,10 @@ async function onMessageReceived(messageId) {
 
 async function requestImagesFromBackend(prompt) {
     const settings = extension_settings[extensionName];
+    if (settings.backendMode === "localdream") {
+        return requestImagesFromLocalDream(prompt);
+    }
+
     const endpoint = resolveChatCompletionsUrl(settings.serviceUrl);
     const userPrompt = renderPrompt(settings.promptTemplate, prompt);
     const extraBody = parseOptionalJson(settings.extraBody, "额外请求体 JSON");
@@ -370,6 +414,204 @@ async function requestImagesFromBackend(prompt) {
         content,
         raw: data,
     };
+}
+
+async function runLocalDreamCheck() {
+    try {
+        setStatus("正在检查 Local Dream...", "info");
+        const status = await checkLocalDreamStatus();
+        const deviceName = status.deviceName || "未知设备";
+        const state = status.status?.state || "unknown";
+        if (state !== "running") {
+            setStatus(`Local Dream 在线，模型未运行（${state}）`, "warning");
+            toastr.warning("Local Dream 在线，请先在设备上加载模型。");
+            return;
+        }
+
+        setStatus(`Local Dream 已就绪：${deviceName}`, "success");
+        toastr.success(`Local Dream 已就绪：${deviceName}`);
+    } catch (error) {
+        console.error(`[${extensionName}] Local Dream check failed`, error);
+        setStatus(error.message, "error");
+        toastr.error(error.message);
+    }
+}
+
+async function checkLocalDreamStatus() {
+    const settings = extension_settings[extensionName];
+    const baseUrl = resolveLocalDreamBaseUrl(settings.localDreamUrl);
+    const info = await requestJson(`${baseUrl}/info`, { method: "GET" }, 5000);
+    if (info?.app !== "localdream") {
+        throw new Error("目标端口不是 Local Dream 设备互联服务。");
+    }
+
+    const status = await requestJson(`${baseUrl}/status`, { method: "GET" }, 5000);
+    return {
+        info,
+        status,
+        deviceName: info.device,
+    };
+}
+
+async function requestImagesFromLocalDream(prompt) {
+    await checkLocalDreamStatus();
+
+    const settings = extension_settings[extensionName];
+    const baseUrl = resolveLocalDreamBaseUrl(settings.localDreamUrl);
+    const controlUrl = new URL(baseUrl);
+    const generationUrl = `${controlUrl.protocol}//${controlUrl.host.replace(/:\d+$/, "")}:8081/generate`;
+    const seedText = String(settings.localDreamSeed || "").trim();
+    const seed = seedText ? Number(seedText) : null;
+
+    const body = {
+        prompt: renderPrompt(settings.promptTemplate, prompt),
+        negative_prompt: String(settings.localDreamNegativePrompt || ""),
+        steps: Number(settings.localDreamSteps) || defaultSettings.localDreamSteps,
+        cfg: Number(settings.localDreamCfg) || defaultSettings.localDreamCfg,
+        scheduler: String(settings.localDreamScheduler || "dpm"),
+        width: Number(settings.localDreamWidth) || defaultSettings.localDreamWidth,
+        height: Number(settings.localDreamHeight) || defaultSettings.localDreamHeight,
+        output_format: "jpeg",
+    };
+
+    if (Number.isFinite(seed) && seed !== null) {
+        body.seed = Math.trunc(seed);
+    }
+
+    const completeEvent = await requestLocalDreamGeneration(generationUrl, body);
+    const dataUrl = normalizeLocalDreamImage(completeEvent);
+    if (!dataUrl) {
+        throw new Error("Local Dream 返回结果中没有图片。");
+    }
+
+    return {
+        images: [dataUrl],
+        content: "",
+        raw: completeEvent,
+    };
+}
+
+async function requestLocalDreamGeneration(url, body) {
+    const controller = new AbortController();
+    const timeoutMs = Number(extension_settings[extensionName].timeoutMs) || defaultSettings.timeoutMs;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let completeEvent;
+
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+        });
+
+        const errorText = async () => (await response.text())?.trim();
+        if (!response.ok) {
+            throw new Error(`Local Dream 生成请求失败：${await errorText() || `HTTP ${response.status}`}`);
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+            throw new Error("浏览器无法读取 Local Dream 的 SSE 响应。");
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let streamingError = "";
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const events = buffer.split(/\r?\n\r?\n/);
+            buffer = events.pop() || "";
+
+            for (const event of events) {
+                const dataLines = event.split(/\r?\n/)
+                    .filter((line) => line.startsWith("data:"))
+                    .map((line) => line.slice(5).trim());
+                if (!dataLines.length) {
+                    continue;
+                }
+
+                let payload;
+                try {
+                    payload = JSON.parse(dataLines.join("\n"));
+                } catch {
+                    continue;
+                }
+
+                if (payload.type === "complete") {
+                    completeEvent = payload;
+                } else if (payload.type === "progress" && payload.total_steps) {
+                    setStatus(`Local Dream 生成中 ${payload.step}/${payload.total_steps}`, "info");
+                } else if (payload.type === "error") {
+                    streamingError = payload.message || "Local Dream 生成失败。";
+                }
+            }
+        }
+
+        if (streamingError) {
+            throw new Error(streamingError);
+        }
+        if (!completeEvent) {
+            throw new Error("Local Dream 响应在完成前结束。");
+        }
+        return completeEvent;
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            throw new Error("Local Dream 生成超时。");
+        }
+        throw error;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+function normalizeLocalDreamImage(event) {
+    const image = String(event?.image || "");
+    const format = String(event?.format || "jpeg").toLowerCase();
+    if (!image) {
+        return "";
+    }
+    if (image.startsWith("data:image/")) {
+        return image;
+    }
+    if (format === "raw") {
+        return "";
+    }
+    const mime = format === "png" ? "image/png" : "image/jpeg";
+    return `data:${mime};base64,${image}`;
+}
+
+function resolveLocalDreamBaseUrl(rawUrl) {
+    const input = String(rawUrl || "").trim();
+    if (!input) {
+        throw new Error("Local Dream 控制地址不能为空。");
+    }
+
+    try {
+        const url = new URL(input);
+        if (!/^https?:$/.test(url.protocol)) {
+            throw new Error();
+        }
+        url.search = "";
+        url.hash = "";
+        return url.toString().replace(/\/+$/, "");
+    } catch {
+        throw new Error("Local Dream 控制地址格式无效。");
+    }
+}
+
+async function requestJson(url, options = {}, timeoutMs = 5000) {
+    const text = await fetchWithTimeout(url, options, timeoutMs);
+    try {
+        return JSON.parse(text);
+    } catch {
+        throw new Error("Local Dream 返回了无效 JSON。");
+    }
 }
 
 async function fetchWithTimeout(url, options, timeoutMs) {

@@ -21,6 +21,57 @@
     <div style="background: rgba(0,0,0,0.2); padding: 8px; border-radius: 5px; margin-bottom: 8px;">
         <label style="font-weight:bold; font-size:0.9em;">2. 图片后端配置</label>
 
+        <label style="display:block; font-size:0.75em; opacity:0.8; margin-top:8px;">后端类型</label>
+        <select id="oair_backend_mode" class="text_pole" style="width:100%; box-sizing:border-box;">
+            <option value="openai">OpenAI 兼容后端</option>
+            <option value="localdream">Local Dream 设备互联</option>
+        </select>
+
+        <div id="oair_localdream_only" style="display:none;">
+            <label style="display:block; font-size:0.75em; opacity:0.8; margin-top:8px;">Local Dream 控制地址</label>
+            <input id="oair_localdream_url" class="text_pole" style="width:100%; box-sizing:border-box;" placeholder="http://127.0.0.1:8808">
+            <div style="margin-top:4px; font-size:0.75em; opacity:0.7;">
+                只检查设备是否在线。请在 Local Dream 设备上选择并加载模型，插件不会远程切换模型。
+            </div>
+            <div style="display:flex; gap:6px; margin-top:6px;">
+                <button id="oair_btn_localdream_check" class="menu_button" style="flex:1; justify-content:center;">检查在线状态</button>
+            </div>
+
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-top:8px;">
+                <div>
+                    <label style="display:block; font-size:0.75em; opacity:0.8;">步数</label>
+                    <input id="oair_localdream_steps" type="number" min="1" step="1" class="text_pole" style="width:100%; box-sizing:border-box;">
+                </div>
+                <div>
+                    <label style="display:block; font-size:0.75em; opacity:0.8;">CFG</label>
+                    <input id="oair_localdream_cfg" type="number" min="1" step="0.1" class="text_pole" style="width:100%; box-sizing:border-box;">
+                </div>
+                <div>
+                    <label style="display:block; font-size:0.75em; opacity:0.8;">宽</label>
+                    <input id="oair_localdream_width" type="number" min="64" step="8" class="text_pole" style="width:100%; box-sizing:border-box;">
+                </div>
+                <div>
+                    <label style="display:block; font-size:0.75em; opacity:0.8;">高</label>
+                    <input id="oair_localdream_height" type="number" min="64" step="8" class="text_pole" style="width:100%; box-sizing:border-box;">
+                </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin-top:6px;">
+                <div>
+                    <label style="display:block; font-size:0.75em; opacity:0.8;">Seed（留空随机）</label>
+                    <input id="oair_localdream_seed" class="text_pole" style="width:100%; box-sizing:border-box;" placeholder="随机">
+                </div>
+                <div>
+                    <label style="display:block; font-size:0.75em; opacity:0.8;">调度器</label>
+                    <input id="oair_localdream_scheduler" class="text_pole" style="width:100%; box-sizing:border-box;" placeholder="dpm">
+                </div>
+            </div>
+
+            <label style="display:block; font-size:0.75em; opacity:0.8; margin-top:6px;">负向提示词</label>
+            <textarea id="oair_localdream_negative_prompt" class="text_pole" rows="2" style="width:100%; box-sizing:border-box;"></textarea>
+        </div>
+
+        <div id="oair_openai_only">
         <label style="display:block; font-size:0.75em; opacity:0.8; margin-top:8px;">服务地址</label>
         <input id="oair_service_url" class="text_pole" style="width:100%; box-sizing:border-box;" placeholder="http://127.0.0.1:8199/v1/chat/completions">
 
@@ -46,6 +97,7 @@
 
         <div style="margin-top:6px; font-size:0.75em; opacity:0.8;">
             这里只负责把提取出来的 <code>&lt;pic prompt="..."&gt;</code> 包装后再发给 image2 后端。
+        </div>
         </div>
     </div>
 
