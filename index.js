@@ -857,7 +857,7 @@ async function consumeLocalDreamStream(response) {
             if (payload.type === "complete") {
                 completeEvent = payload;
             } else if (payload.type === "progress" && payload.total_steps) {
-                setStatus(`Local Dream 生成中 ${payload.step}/${payload.total_steps}`, "info");
+                setStatus(describeLocalDreamProgress(payload), "info");
             } else if (payload.type === "error") {
                 streamingError = payload.message || "Local Dream 生成失败。";
             }
@@ -871,6 +871,29 @@ async function consumeLocalDreamStream(response) {
         throw new Error("Local Dream 响应在完成前结束。");
     }
     return completeEvent;
+}
+
+// 后端 Pipeline::generate() 的 total_steps = 采样步数 + 2，
+// 多出来的两步是 CLIP 文本编码（第 1 次回调）和 VAE 解码出图（最后一次回调），
+// 采样本身仍然是用户设置的步数。这里把回调换算回采样语义，避免让 20 步显示成 22。
+function describeLocalDreamProgress(payload) {
+    const reported = Number(payload?.total_steps) || 0;
+    const step = Number(payload?.step) || 0;
+
+    if (reported <= 2) {
+        return `Local Dream 生成中 ${step}/${reported}`;
+    }
+
+    const samplingTotal = reported - 2;
+    const samplingStep = Math.max(0, Math.min(samplingTotal, step - 1));
+
+    if (step <= 1) {
+        return `Local Dream 编码提示词…（采样共 ${samplingTotal} 步）`;
+    }
+    if (step >= reported) {
+        return `Local Dream 解码图像…（采样 ${samplingTotal}/${samplingTotal} 步已完成）`;
+    }
+    return `Local Dream 采样 ${samplingStep}/${samplingTotal}`;
 }
 
 function normalizeLocalDreamImage(event) {

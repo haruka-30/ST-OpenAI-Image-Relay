@@ -68,6 +68,28 @@ Local Dream 有两套端口：`8808` 控制 API 和 `8081` 原生生图后端。
 
 超时单独设成 Local Dream 专用是有必要的：手机 NPU 跑 20 步 1024×1024 常常要 2 分钟以上，用默认的 120 秒会中途中断。
 
+### 关于进度条步数
+
+local-dream 的 `Pipeline::generate()` 里写死了：
+
+```cpp
+int total_run_steps = req.steps + (req.img2img ? 1 : 0) + 2;
+```
+
+后端把 **CLIP 文本编码**（第 1 次回调）和 **VAE 解码出图**（最后一次回调）也算进了总步数，所以设置的 20 步会被报成 22，实际 UNet 采样仍然是 20 次。
+
+插件会把回调换回采样语义再显示，因此你会看到：
+
+```text
+Local Dream 编码提示词…（采样共 20 步）
+Local Dream 采样 1/20
+...
+Local Dream 采样 19/20
+Local Dream 解码图像…（采样 20/20 步已完成）
+```
+
+看到 `/20` 就是对的，不用去改步数。
+
 重要设置项
 
 服务 URL (Service URL)： 接收完整的 .../chat/completions 链接，或者像 .../v1 这样的基础路径。
