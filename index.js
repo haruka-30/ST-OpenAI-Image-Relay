@@ -12,6 +12,7 @@ import {
 import { regexFromString } from "../../../utils.js";
 
 const extensionName = "ST-OpenAI-Image-Relay";
+const EXTENSION_BUILD = "0.5.1";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
 const mainPromptKey = `${extensionName}-MAIN-PROMPT`;
 const markdownImageRegex = /!\[[^\]]*]\(([^)\s]+)\)/g;
@@ -105,8 +106,28 @@ $(function () {
 
         eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
         eventSource.on(externalImageRequestEvent, onExternalImageRequest);
+
+        // 自检日志：终端用户排查时，从 console（或 cocktail-plus 的 browser-logs）一眼能看出
+        // 插件是否是新版、事件桥有没有挂上。
+        console.info(
+            `[${extensionName}] ${EXTENSION_BUILD} ready · bridge: ${externalImageRequestEvent} -> ${externalImageResponseEvent} · ` +
+            `listeners(request)=${countEventListeners(externalImageRequestEvent)}`,
+        );
     })();
 });
+
+function countEventListeners(eventName) {
+    try {
+        const store = eventSource._events || eventSource.events;
+        const entry = store?.[eventName];
+        if (!entry) {
+            return 0;
+        }
+        return Array.isArray(entry) ? entry.length : 1;
+    } catch {
+        return -1;
+    }
+}
 
 function ensureSettings() {
     const current = extension_settings[extensionName] || {};
@@ -530,11 +551,19 @@ async function onMessageReceived(messageId) {
 async function onExternalImageRequest(payload) {
     const request = normalizeExternalImageRequest(payload);
     if (!request) {
+        console.warn(`[${extensionName}] image request ignored (unparsable payload):`, payload);
         return;
     }
 
+    console.info(`[${extensionName}] image request ${request.id}:`, {
+        prompt: request.prompt.slice(0, 120),
+        width: request.width,
+        height: request.height,
+    });
+
     const settings = extension_settings[extensionName];
     if (!settings?.enabled) {
+        console.warn(`[${extensionName}] image request ${request.id} rejected: extension disabled`);
         eventSource.emit(externalImageResponseEvent, {
             id: request.id,
             success: false,
@@ -556,6 +585,7 @@ async function onExternalImageRequest(payload) {
             success: true,
             imageData: image,
         });
+        console.info(`[${extensionName}] image response sent for ${request.id} (${image.length} chars)`);
         setStatus(`外部生图完成：${request.id}`, "success");
     } catch (error) {
         const message = error?.message || String(error);
@@ -565,6 +595,7 @@ async function onExternalImageRequest(payload) {
             success: false,
             error: message,
         });
+        console.warn(`[${extensionName}] image response (failure) sent for ${request.id}: ${message}`);
         setStatus(`外部生图失败：${message}`, "error");
     }
 }
