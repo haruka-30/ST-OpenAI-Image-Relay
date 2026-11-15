@@ -189,6 +189,18 @@
             这里只负责把提取出来的 <code>&lt;pic prompt="..."&gt;</code> 包装后再发给 image2 后端。
         </div>
         </div>
+
+        <div style="margin-top:10px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.1);">
+            <label class="oair-switch">
+                <input id="oair_persist_story_image" type="checkbox">
+                正文配图持久化
+            </label>
+            <div class="oair-hint">
+                角色卡自带的正文配图只放在内存里，刷新或切换回合后就没了。开启后，生成的图会另存为服务器文件，
+                并按「正文指纹」记到当前聊天的元数据里，重新进入或翻回旧回合时会自动挂回来。
+                图片存成独立文件而不是 base64，聊天存档不会变胖。
+            </div>
+        </div>
     </div>
 
     <div style="background: rgba(0,0,0,0.2); padding: 8px; border-radius: 5px; margin-bottom: 8px;">
