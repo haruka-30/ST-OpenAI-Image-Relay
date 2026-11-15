@@ -50,6 +50,24 @@ Local Dream 有两套端口：`8808` 控制 API 和 `8081` 原生生图后端。
 - **请求通道**：`自动` 先直连、失败再走 SillyTavern 的 `/proxy/` 转发；`仅直连`；`仅走酒馆转发`。
   酒馆转发需要 `config.yaml` 里 `enableCorsProxy: true` 并重启酒馆。开启后控制端口也能读通，状态检查会显示设备名和已加载的模型。
 
+### 生图参数
+
+面板按手机端「高级参数设置」的布局组织：
+
+| 设置 | 说明 |
+|---|---|
+| 图像宽高比 | `自动`（0×0，跟随设备当前分辨率）、`1:1`、`3:4`、`4:3`、`自定义`（手填宽高） |
+| 调度器 | `Euler A` / `Euler` / `LCM` / `DPM++ 2M` / `DPM++ 2M SDE` |
+| Karras | 给调度器加 `_karras` 后缀。`LCM` 没有 Karras 变体，选中时开关自动禁用 |
+| 生成步数 / CFG Scale | 直接透传给 `/generate` |
+| 重绘强度 Denoise | `denoise_strength`，仅 img2img 生效；纯文生图时后端忽略 |
+| Seed | 留空则随机 |
+| 超时（秒） | 单张图的等待上限，默认 600 秒 |
+
+调度器实际发送的值会显示在 chips 下方（例如选 `Euler` + 开 Karras 就是 `euler_karras`）。取值来自 local-dream 的 `createScheduler()`，未知值会被后端静默回落到 DPM。
+
+超时单独设成 Local Dream 专用是有必要的：手机 NPU 跑 20 步 1024×1024 常常要 2 分钟以上，用默认的 120 秒会中途中断。
+
 重要设置项
 
 服务 URL (Service URL)： 接收完整的 .../chat/completions 链接，或者像 .../v1 这样的基础路径。

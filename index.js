@@ -52,12 +52,33 @@ const defaultSettings = {
     localDreamHeight: 0,
     localDreamSeed: "",
     localDreamScheduler: "dpm",
+    localDreamKarras: false,
+    localDreamDenoise: 0.6,
+    localDreamTimeoutMs: 600000,
     timeoutMs: 120000,
     promptTemplate: "请根据以下提示词生成图片，并且只返回最终图片。\n\n{{prompt}}",
     extractionRegex: '/<pic[^>]*\\sprompt="([^"]+)"[^>]*>/g',
     responseImageRegex: "/!\\[[^\\]]*\\]\\(([^)\\s]+)\\)/g",
     extraBody: "",
 };
+
+// Local Dream 的 scheduler 是「基础档 + _karras 后缀」两段结构，
+// 取值来自 local-dream 的 createScheduler()，未知值会静默回落到 DPM。
+const LOCAL_DREAM_SCHEDULERS = [
+    { id: "euler_a", label: "Euler A", karras: true },
+    { id: "euler", label: "Euler", karras: true },
+    { id: "lcm", label: "LCM", karras: false },
+    { id: "dpm", label: "DPM++ 2M", karras: true },
+    { id: "dpm_sde", label: "DPM++ 2M SDE", karras: true },
+];
+
+const LOCAL_DREAM_ASPECTS = [
+    { id: "auto", label: "自动", width: 0, height: 0 },
+    { id: "1:1", label: "1:1", width: 1024, height: 1024 },
+    { id: "3:4", label: "3:4", width: 768, height: 1024 },
+    { id: "4:3", label: "4:3", width: 1024, height: 768 },
+    { id: "custom", label: "自定义", width: null, height: null },
+];
 
 $(function () {
     (async function () {
@@ -137,10 +158,15 @@ function bindUiEvents() {
     bindSettingInput("#oair_localdream_width", "localDreamWidth", () => Math.max(0, Number($("#oair_localdream_width").val()) || 0));
     bindSettingInput("#oair_localdream_height", "localDreamHeight", () => Math.max(0, Number($("#oair_localdream_height").val()) || 0));
     bindSettingInput("#oair_localdream_seed", "localDreamSeed", () => $("#oair_localdream_seed").val());
-    bindSettingInput("#oair_localdream_scheduler", "localDreamScheduler", () => $("#oair_localdream_scheduler").val());
+    bindSettingInput("#oair_localdream_timeout", "localDreamTimeoutMs", () => {
+        const seconds = Number($("#oair_localdream_timeout").val());
+        return seconds > 0 ? Math.round(seconds * 1000) : defaultSettings.localDreamTimeoutMs;
+    });
     $("#oair_backend_mode").on("input", updateBackendModeUi);
     $("#oair_localdream_proxy_mode, #oair_localdream_url, #oair_localdream_generation_url")
         .on("input", () => { localDreamProxySupport = null; });
+    $("#oair_localdream_width, #oair_localdream_height").on("input", refreshLocalDreamChipStates);
+    bindLocalDreamParameterControls();
     bindSettingInput("#oair_timeout_ms", "timeoutMs", () => Number($("#oair_timeout_ms").val()) || defaultSettings.timeoutMs);
     bindSettingInput("#oair_prompt_template", "promptTemplate", () => $("#oair_prompt_template").val());
     bindSettingInput("#oair_extraction_regex", "extractionRegex", () => $("#oair_extraction_regex").val());
@@ -190,13 +216,126 @@ function updateSettingsUi() {
     $("#oair_localdream_width").val(Number(settings.localDreamWidth) || 0);
     $("#oair_localdream_height").val(Number(settings.localDreamHeight) || 0);
     $("#oair_localdream_seed").val(settings.localDreamSeed || "");
-    $("#oair_localdream_scheduler").val(settings.localDreamScheduler || "");
+    $("#oair_localdream_karras").prop("checked", !!settings.localDreamKarras);
+    $("#oair_localdream_denoise").val(Number.isFinite(Number(settings.localDreamDenoise)) ? Number(settings.localDreamDenoise) : defaultSettings.localDreamDenoise);
+    $("#oair_localdream_denoise_value").text(formatDenoise(settings.localDreamDenoise));
+    $("#oair_localdream_timeout").val(Math.round((Number(settings.localDreamTimeoutMs) || defaultSettings.localDreamTimeoutMs) / 1000));
     $("#oair_timeout_ms").val(Number(settings.timeoutMs) || defaultSettings.timeoutMs);
     $("#oair_prompt_template").val(settings.promptTemplate || "");
     $("#oair_extraction_regex").val(settings.extractionRegex || "");
     $("#oair_response_image_regex").val(settings.responseImageRegex || "");
     $("#oair_extra_body").val(settings.extraBody || "");
+    buildLocalDreamChips();
     updateBackendModeUi();
+}
+
+function formatDenoise(value) {
+    const num = Number(value);
+    return Number.isFinite(num) ? num.toFixed(2) : defaultSettings.localDreamDenoise.toFixed(2);
+}
+
+function buildLocalDreamChips() {
+    const schedulerContainer = $("#oair_localdream_scheduler_chips");
+    if (schedulerContainer.length && !schedulerContainer.children().length) {
+        for (const item of LOCAL_DREAM_SCHEDULERS) {
+            $("<div>")
+                .addClass("oair-chip")
+                .attr("data-scheduler", item.id)
+                .attr("data-karras", item.karras ? "1" : "0")
+                .text(item.label)
+                .appendTo(schedulerContainer);
+        }
+        schedulerContainer.on("click", ".oair-chip", function () {
+            extension_settings[extensionName].localDreamScheduler = String($(this).attr("data-scheduler") || "dpm");
+            saveSettingsDebounced();
+            refreshLocalDreamChipStates();
+        });
+    }
+
+    const aspectContainer = $("#oair_localdream_aspect");
+    if (aspectContainer.length && !aspectContainer.children().length) {
+        for (const item of LOCAL_DREAM_ASPECTS) {
+            $("<div>")
+                .addClass("oair-chip")
+                .attr("data-aspect", item.id)
+                .text(item.label)
+                .appendTo(aspectContainer);
+        }
+        aspectContainer.on("click", ".oair-chip", function () {
+            const id = String($(this).attr("data-aspect") || "auto");
+            const item = LOCAL_DREAM_ASPECTS.find((entry) => entry.id === id);
+            if (!item) {
+                return;
+            }
+            if (item.width !== null) {
+                extension_settings[extensionName].localDreamWidth = item.width;
+                extension_settings[extensionName].localDreamHeight = item.height;
+                $("#oair_localdream_width").val(item.width);
+                $("#oair_localdream_height").val(item.height);
+                saveSettingsDebounced();
+            }
+            refreshLocalDreamChipStates();
+        });
+    }
+
+    refreshLocalDreamChipStates();
+}
+
+function refreshLocalDreamChipStates() {
+    const settings = extension_settings[extensionName];
+    if (!settings) {
+        return;
+    }
+
+    const scheduler = String(settings.localDreamScheduler || defaultSettings.localDreamScheduler);
+    const entry = LOCAL_DREAM_SCHEDULERS.find((item) => item.id === scheduler);
+    const supportsKarras = entry ? entry.karras : scheduler !== "lcm";
+    const karrasEnabled = !!settings.localDreamKarras && supportsKarras;
+
+    $("#oair_localdream_scheduler_chips .oair-chip").each(function () {
+        $(this).toggleClass("oair-active", String($(this).attr("data-scheduler")) === scheduler);
+    });
+
+    $("#oair_localdream_karras")
+        .prop("disabled", !supportsKarras)
+        .prop("checked", karrasEnabled);
+    $("#oair_localdream_karras").closest(".oair-switch").toggleClass("oair-disabled", !supportsKarras);
+    $("#oair_localdream_scheduler_effective").text(
+        resolveLocalDreamScheduler({ ...settings, localDreamKarras: karrasEnabled }),
+    );
+
+    const width = Number(settings.localDreamWidth) || 0;
+    const height = Number(settings.localDreamHeight) || 0;
+    let currentAspect = "custom";
+    if (width === 0 && height === 0) {
+        currentAspect = "auto";
+    } else {
+        const hit = LOCAL_DREAM_ASPECTS.find((item) => item.width === width && item.height === height);
+        if (hit) {
+            currentAspect = hit.id;
+        }
+    }
+
+    $("#oair_localdream_aspect .oair-chip").each(function () {
+        $(this).toggleClass("oair-active", String($(this).attr("data-aspect")) === currentAspect);
+    });
+}
+
+function bindLocalDreamParameterControls() {
+    $("#oair_localdream_karras").off("change").on("change", () => {
+        extension_settings[extensionName].localDreamKarras = $("#oair_localdream_karras").prop("checked");
+        saveSettingsDebounced();
+        refreshLocalDreamChipStates();
+    });
+
+    $("#oair_localdream_denoise").off("input").on("input", () => {
+        const value = Number($("#oair_localdream_denoise").val());
+        extension_settings[extensionName].localDreamDenoise = Number.isFinite(value)
+            ? value
+            : defaultSettings.localDreamDenoise;
+        $("#oair_localdream_denoise_value").text(formatDenoise(extension_settings[extensionName].localDreamDenoise));
+        saveSettingsDebounced();
+    });
 }
 
 function updateBackendModeUi() {
@@ -568,7 +707,7 @@ async function requestImagesFromLocalDream(prompt) {
         negative_prompt: String(settings.localDreamNegativePrompt || ""),
         steps: Number(settings.localDreamSteps) || defaultSettings.localDreamSteps,
         cfg: Number(settings.localDreamCfg) || defaultSettings.localDreamCfg,
-        scheduler: String(settings.localDreamScheduler || "dpm"),
+        scheduler: resolveLocalDreamScheduler(settings),
         output_format: "jpeg",
     };
 
@@ -587,7 +726,14 @@ async function requestImagesFromLocalDream(prompt) {
         body.seed = Math.trunc(seed);
     }
 
-    setStatus(`Local Dream 生成中：${probe.modelId || probe.deviceName || "设备"}...`, "info");
+    // 纯文生图时后端会忽略 denoise_strength；只有带 base64 image 的 img2img 请求才生效。
+    // 这里照样透传，方便以后接参考图，也方便和手机端面板参数对齐。
+    const denoise = Number(settings.localDreamDenoise);
+    if (Number.isFinite(denoise) && denoise > 0) {
+        body.denoise_strength = Math.min(1, Math.max(0, denoise));
+    }
+
+    setStatus(`Local Dream 生成中：${probe.modelId || probe.deviceName || "设备"}（${body.scheduler}）...`, "info");
     const completeEvent = await requestLocalDreamGeneration(`${endpoints.generationBase}/generate`, body);
     const dataUrl = normalizeLocalDreamImage(completeEvent);
     if (!dataUrl) {
@@ -601,14 +747,28 @@ async function requestImagesFromLocalDream(prompt) {
     };
 }
 
+// LCM 没有 karras 变体，其余四档都支持 _karras 后缀。
+function resolveLocalDreamScheduler(settings) {
+    const base = String(settings?.localDreamScheduler || "dpm");
+    const entry = LOCAL_DREAM_SCHEDULERS.find((item) => item.id === base);
+    const supportsKarras = entry ? entry.karras : base !== "lcm";
+    if (settings?.localDreamKarras && supportsKarras) {
+        return `${base}_karras`;
+    }
+    return base;
+}
+
 async function requestLocalDreamGeneration(url, body) {
     const candidates = localDreamUrlCandidates(url);
     let lastError;
     let directError;
+    const settings = extension_settings[extensionName];
 
     for (const candidate of candidates) {
         const controller = new AbortController();
-        const timeoutMs = Number(extension_settings[extensionName].timeoutMs) || defaultSettings.timeoutMs;
+        const timeoutMs = Number(settings.localDreamTimeoutMs)
+            || Number(settings.timeoutMs)
+            || defaultSettings.localDreamTimeoutMs;
         const timer = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
