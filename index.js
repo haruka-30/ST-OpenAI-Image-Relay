@@ -80,6 +80,13 @@ const LOCAL_DREAM_ASPECTS = [
     { id: "custom", label: "自定义", width: null, height: null },
 ];
 
+// 角色卡里的自建前端（TH-script / iframe 前端）不走 MESSAGE_RECEIVED，
+// 而是走一对桥接事件：emit 请求，等插件回响应。
+//   request  : { id, prompt, change, width, height }
+//   response : { id, success: true, imageData } | { id, success: false, error }
+const externalImageRequestEvent = "generate-image-request";
+const externalImageResponseEvent = "generate-image-response";
+
 $(function () {
     (async function () {
         ensureSettings();
@@ -97,6 +104,7 @@ $(function () {
         }, 1000);
 
         eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
+        eventSource.on(externalImageRequestEvent, onExternalImageRequest);
     })();
 });
 
@@ -287,10 +295,11 @@ function refreshLocalDreamChipStates() {
         return;
     }
 
-    const scheduler = String(settings.localDreamScheduler || defaultSettings.localDreamScheduler);
+    const parsed = parseLocalDreamScheduler(settings.localDreamScheduler);
+    const scheduler = parsed.id;
     const entry = LOCAL_DREAM_SCHEDULERS.find((item) => item.id === scheduler);
     const supportsKarras = entry ? entry.karras : scheduler !== "lcm";
-    const karrasEnabled = !!settings.localDreamKarras && supportsKarras;
+    const karrasEnabled = (!!settings.localDreamKarras || parsed.karras) && supportsKarras;
 
     $("#oair_localdream_scheduler_chips .oair-chip").each(function () {
         $(this).toggleClass("oair-active", String($(this).attr("data-scheduler")) === scheduler);
@@ -517,10 +526,90 @@ async function onMessageReceived(messageId) {
     }
 }
 
-async function requestImagesFromBackend(prompt) {
+// 接住角色卡自建前端发来的生图请求：同一套后端逻辑，结果通过桥接事件回传。
+async function onExternalImageRequest(payload) {
+    const request = normalizeExternalImageRequest(payload);
+    if (!request) {
+        return;
+    }
+
+    const settings = extension_settings[extensionName];
+    if (!settings?.enabled) {
+        eventSource.emit(externalImageResponseEvent, {
+            id: request.id,
+            success: false,
+            error: "OpenAI 图片中继已停用。",
+        });
+        return;
+    }
+
+    try {
+        setStatus(`外部生图请求：${request.id}`, "info");
+        const result = await requestImagesFromBackend(request.prompt, request);
+        const image = result.images?.[0];
+        if (!image) {
+            throw new Error("后端没有返回图片。");
+        }
+
+        eventSource.emit(externalImageResponseEvent, {
+            id: request.id,
+            success: true,
+            imageData: image,
+        });
+        setStatus(`外部生图完成：${request.id}`, "success");
+    } catch (error) {
+        const message = error?.message || String(error);
+        console.error(`[${extensionName}] External image request failed`, error);
+        eventSource.emit(externalImageResponseEvent, {
+            id: request.id,
+            success: false,
+            error: message,
+        });
+        setStatus(`外部生图失败：${message}`, "error");
+    }
+}
+
+// 兼容三种形态：对象、(event, data) 的第 1 个参数数组、JSON 字符串。
+function normalizeExternalImageRequest(payload) {
+    let data = payload;
+
+    if (Array.isArray(data)) {
+        const objectItem = data.find((item) => item && typeof item === "object");
+        data = objectItem ?? data[0];
+    }
+    if (typeof data === "string") {
+        try {
+            data = JSON.parse(data);
+        } catch {
+            return null;
+        }
+    }
+    if (!data || typeof data !== "object") {
+        return null;
+    }
+
+    const prompt = String(data.prompt || "").trim();
+    if (!prompt) {
+        return null;
+    }
+
+    // change 在角色卡里的语义是「修改/添加」，拼到主提示词后面。
+    const change = String(data.change ?? "").trim();
+    const width = Number(data.width) || 0;
+    const height = Number(data.height) || 0;
+
+    return {
+        id: data.id != null ? String(data.id) : `oair-${Date.now()}`,
+        prompt: change ? `${prompt}, ${change}` : prompt,
+        width,
+        height,
+    };
+}
+
+async function requestImagesFromBackend(prompt, overrides = {}) {
     const settings = extension_settings[extensionName];
     if (settings.backendMode === "localdream") {
-        return requestImagesFromLocalDream(prompt);
+        return requestImagesFromLocalDream(prompt, overrides);
     }
 
     const endpoint = resolveChatCompletionsUrl(settings.serviceUrl);
@@ -682,7 +771,7 @@ async function checkLocalDreamStatus() {
     return probe;
 }
 
-async function requestImagesFromLocalDream(prompt) {
+async function requestImagesFromLocalDream(prompt, overrides = {}) {
     const settings = extension_settings[extensionName];
     const endpoints = resolveLocalDreamEndpoints(settings.localDreamUrl, settings.localDreamGenerationUrl);
     const probe = await checkLocalDreamStatus();
@@ -711,9 +800,9 @@ async function requestImagesFromLocalDream(prompt) {
         output_format: "jpeg",
     };
 
-    // 宽高：手填优先 → 其次是设备 /status 报告的运行分辨率 → 都不确定就不发，让后端按自身配置决定。
-    const width = Number(settings.localDreamWidth) || 0;
-    const height = Number(settings.localDreamHeight) || 0;
+    // 宽高：外部请求显式指定 > 面板手填 > 设备 /status 报告的运行分辨率 > 都不确定就不发。
+    const width = Number(overrides?.width) || Number(settings.localDreamWidth) || 0;
+    const height = Number(overrides?.height) || Number(settings.localDreamHeight) || 0;
     if (width > 0 && height > 0) {
         body.width = width;
         body.height = height;
@@ -749,13 +838,62 @@ async function requestImagesFromLocalDream(prompt) {
 
 // LCM 没有 karras 变体，其余四档都支持 _karras 后缀。
 function resolveLocalDreamScheduler(settings) {
-    const base = String(settings?.localDreamScheduler || "dpm");
-    const entry = LOCAL_DREAM_SCHEDULERS.find((item) => item.id === base);
-    const supportsKarras = entry ? entry.karras : base !== "lcm";
-    if (settings?.localDreamKarras && supportsKarras) {
-        return `${base}_karras`;
+    const parsed = parseLocalDreamScheduler(settings?.localDreamScheduler);
+    const entry = LOCAL_DREAM_SCHEDULERS.find((item) => item.id === parsed.id);
+    const supportsKarras = entry ? entry.karras : parsed.id !== "lcm";
+    const wantKarras = !!settings?.localDreamKarras || parsed.karras;
+    return wantKarras && supportsKarras ? `${parsed.id}_karras` : parsed.id;
+}
+
+// 旧版本这里是自由文本输入框，用户可能填了「Euler」「DPM++ 2M」「euler karras」这类显示名。
+// 统一归一化成后端认识的 id，避免静默回落到 DPM。
+const LOCAL_DREAM_SCHEDULER_ALIASES = new Map([
+    ["euler a", "euler_a"],
+    ["euler_a", "euler_a"],
+    ["eulera", "euler_a"],
+    ["euler", "euler"],
+    ["lcm", "lcm"],
+    ["dpm", "dpm"],
+    ["dpm++ 2m", "dpm"],
+    ["dpm++2m", "dpm"],
+    ["dpmpp2m", "dpm"],
+    ["dpmsolver", "dpm"],
+    ["dpm_sde", "dpm_sde"],
+    ["dpm++ 2m sde", "dpm_sde"],
+    ["dpm++2m sde", "dpm_sde"],
+    ["dpm sde", "dpm_sde"],
+]);
+
+function parseLocalDreamScheduler(raw) {
+    let text = String(raw ?? "").trim().toLowerCase();
+    let karras = false;
+
+    if (text.endsWith("_karras")) {
+        karras = true;
+        text = text.slice(0, -"_karras".length);
     }
-    return base;
+    if (/\bkarras\b/.test(text)) {
+        karras = true;
+        text = text.replace(/\bkarras\b/g, " ");
+    }
+    text = text.replace(/\s+/g, " ").trim();
+    if (!text) {
+        return { id: "dpm", karras };
+    }
+
+    const direct = LOCAL_DREAM_SCHEDULERS.find((item) => item.id === text);
+    if (direct) {
+        return { id: direct.id, karras };
+    }
+
+    const alias = LOCAL_DREAM_SCHEDULER_ALIASES.get(text);
+    if (alias) {
+        return { id: alias, karras };
+    }
+
+    const slug = text.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    const hit = LOCAL_DREAM_SCHEDULERS.find((item) => item.id === slug);
+    return { id: hit ? hit.id : "dpm", karras };
 }
 
 async function requestLocalDreamGeneration(url, body) {

@@ -68,6 +68,35 @@ Local Dream 有两套端口：`8808` 控制 API 和 `8081` 原生生图后端。
 
 超时单独设成 Local Dream 专用是有必要的：手机 NPU 跑 20 步 1024×1024 常常要 2 分钟以上，用默认的 120 秒会中途中断。
 
+### 角色卡自建前端的生图请求（事件桥）
+
+有些角色卡（例如「诡秘之主：第五纪」）自带前端，不走聊天气泡里的 `<pic prompt="...">`，而是用一对桥接事件请求生图：
+
+```js
+// 角色卡前端
+eventEmit("generate-image-request", { id, prompt, change, width, height });
+eventOn("generate-image-response", (data) => {
+    // data = { id, success: true, imageData } 或 { id, success: false, error }
+});
+```
+
+`eventEmit` / `eventOn` 由 iframe 前端助手（ST-Prompt-Template / JS-Slash-Runner）提供，事件最终落在宿主页面的 `eventSource` 上。
+
+扩展会监听 `generate-image-request`，用同一套后端逻辑生图，再把结果通过 `generate-image-response` 回传，`id` 原样带回。参数处理：
+
+| 字段 | 处理 |
+|---|---|
+| `id` | 原样回传，前端靠它匹配请求 |
+| `prompt` | 主提示词 |
+| `change` | 追加到 `prompt` 后面（`prompt, change`） |
+| `width` / `height` | 覆盖面板里的宽高；传 0 或省略则按面板设置和设备分辨率 |
+
+注意 `eventEmit` 经 iframe 转发后，handler 收到的是 `[data]` 这种数组形态，扩展已兼容。
+
+**超时必须两边一起调**：角色卡前端有自己的生图等待超时（`imageGenTimeoutSeconds`，默认 120 秒），手机 NPU 跑 20 步 1024×1024 要 250 秒左右，前端会先报超时。请把角色卡设置里的生图超时也调到 300 秒以上，并保证扩展这边的「超时（秒）」不小于它。
+
+
+
 ### 关于进度条步数
 
 local-dream 的 `Pipeline::generate()` 里写死了：
