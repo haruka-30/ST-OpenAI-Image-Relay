@@ -8,13 +8,11 @@ import {
     setExtensionPrompt,
     extension_prompt_types,
     extension_prompt_roles,
-    chat_metadata,
-    saveChatConditional,
 } from "../../../../script.js";
-import { regexFromString, saveBase64AsFile } from "../../../utils.js";
+import { regexFromString } from "../../../utils.js";
 
 const extensionName = "ST-OpenAI-Image-Relay";
-const EXTENSION_BUILD = "0.6.0";
+const EXTENSION_BUILD = "0.5.1";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
 const mainPromptKey = `${extensionName}-MAIN-PROMPT`;
 const markdownImageRegex = /!\[[^\]]*]\(([^)\s]+)\)/g;
@@ -58,7 +56,6 @@ const defaultSettings = {
     localDreamKarras: false,
     localDreamDenoise: 0.6,
     localDreamTimeoutMs: 600000,
-    persistStoryImage: true,
     timeoutMs: 120000,
     promptTemplate: "请根据以下提示词生成图片，并且只返回最终图片。\n\n{{prompt}}",
     extractionRegex: '/<pic[^>]*\\sprompt="([^"]+)"[^>]*>/g',
@@ -91,13 +88,6 @@ const LOCAL_DREAM_ASPECTS = [
 const externalImageRequestEvent = "generate-image-request";
 const externalImageResponseEvent = "generate-image-response";
 
-// 角色卡的正文配图只存在内存里（源码注释写明「仅内存，不持久化」），刷新即丢。
-// 这里补一层持久化：图片落成服务器文件，聊天元数据里只按「正文指纹」记 URL。
-const STORY_IMAGE_META_KEY = `${extensionName}-story-images`;
-const STORY_IMAGE_DOM_ID = "oair-story-image";
-const STORY_IMAGE_MAX_ENTRIES = 60;
-const STORY_SYNC_THROTTLE_MS = 400;
-
 $(function () {
     (async function () {
         ensureSettings();
@@ -116,30 +106,6 @@ $(function () {
 
         eventSource.on(event_types.MESSAGE_RECEIVED, onMessageReceived);
         eventSource.on(externalImageRequestEvent, onExternalImageRequest);
-
-        // 持久化配图的挂载时机：切聊天、消息重绘，外加一个低频兜底轮询
-        // （角色卡内部换回合不一定改动 DOM 结构，光靠 MutationObserver 会漏）。
-        eventSource.on(event_types.CHAT_CHANGED, () => {
-            storyFrameCache = null;
-            storyLastLen = -1;
-            scheduleStoryImageSync("chat-changed");
-        });
-        eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, () => scheduleStoryImageSync("rendered"));
-        setInterval(() => {
-            if (document.visibilityState === "hidden") {
-                return;
-            }
-            const display = storyObservedDisplay;
-            if (!display || !display.isConnected) {
-                // 正文区还没被角色卡渲染出来（刷新后要等前端初始化），继续重试。
-                scheduleStoryImageSync("poll-no-display");
-                return;
-            }
-            const length = (display.textContent || "").length;
-            if (length !== storyLastLen) {
-                scheduleStoryImageSync("poll");
-            }
-        }, 5000);
 
         // 自检日志：终端用户排查时，从 console（或 cocktail-plus 的 browser-logs）一眼能看出
         // 插件是否是新版、事件桥有没有挂上。
@@ -209,8 +175,6 @@ function bindUiEvents() {
     bindSettingInput("#oair_enabled", "enabled", () => $("#oair_enabled").prop("checked"));
     bindSettingInput("#oair_main_prompt", "mainPrompt", () => $("#oair_main_prompt").val());
     bindSettingInput("#oair_backend_mode", "backendMode", () => $("#oair_backend_mode").val());
-    bindSettingInput("#oair_persist_story_image", "persistStoryImage", () => $("#oair_persist_story_image").prop("checked"));
-    $("#oair_persist_story_image").on("input", () => scheduleStoryImageSync("toggle"));
     bindSettingInput("#oair_service_url", "serviceUrl", () => $("#oair_service_url").val());
     bindSettingInput("#oair_api_key", "apiKey", () => $("#oair_api_key").val());
     bindSettingInput("#oair_model", "model", () => $("#oair_model").val());
@@ -272,7 +236,6 @@ function updateSettingsUi() {
     $("#oair_service_url").val(settings.serviceUrl || "");
     $("#oair_api_key").val(settings.apiKey || "");
     $("#oair_model").val(settings.model || "");
-    $("#oair_persist_story_image").prop("checked", settings.persistStoryImage !== false);
     $("#oair_localdream_url").val(settings.localDreamUrl || "");
     $("#oair_localdream_generation_url").val(settings.localDreamGenerationUrl || "");
     $("#oair_localdream_proxy_mode").val(settings.localDreamProxyMode || defaultSettings.localDreamProxyMode);
@@ -585,258 +548,6 @@ async function onMessageReceived(messageId) {
 }
 
 // 接住角色卡自建前端发来的生图请求：同一套后端逻辑，结果通过桥接事件回传。
-// ===== 正文配图持久化 =====
-// 角色卡只把配图放在内存里，刷新、切回合后再回来都看不到。
-// 这里用「正文指纹」当锚点：图片以文件形式存到服务器，聊天元数据里只记 URL。
-
-let storyFrameCache = null;
-let storyObserver = null;
-let storyObservedDoc = null;
-let storyObservedDisplay = null;
-let storySyncTimer = null;
-let storySyncPending = false;
-let storyLastLen = -1;
-let storyChatSaveTimer = null;
-
-// 正文可能上千字，做全量哈希太贵；用「长度 + 首尾采样」做廉价指纹。
-// 必须先剥掉空白：角色卡重渲染时多一个换行就会让指纹对不上，图片就挂不回来了。
-function storyFingerprint(text) {
-    const src = String(text ?? "").replace(/\s+/g, "");
-    if (!src) {
-        return "";
-    }
-    const head = src.slice(0, 96);
-    const tail = src.length > 160 ? src.slice(-64) : "";
-    let hash = 2166136261;
-    for (let i = 0; i < head.length; i++) {
-        hash ^= head.charCodeAt(i);
-        hash = Math.imul(hash, 16777619);
-    }
-    for (let i = 0; i < tail.length; i++) {
-        hash ^= tail.charCodeAt(i);
-        hash = Math.imul(hash, 16777619);
-    }
-    return `${src.length}-${(hash >>> 0).toString(36)}`;
-}
-
-function findStoryDocument() {
-    const cached = storyFrameCache;
-    if (cached?.frame?.isConnected) {
-        try {
-            const doc = cached.frame.contentDocument;
-            if (doc?.querySelector("#game-text-display")) {
-                return doc;
-            }
-        } catch {
-            // 跨域或已卸载，往下重新找
-        }
-    }
-    storyFrameCache = null;
-
-    for (const frame of document.querySelectorAll("iframe")) {
-        let doc;
-        try {
-            doc = frame.contentDocument;
-        } catch {
-            continue;
-        }
-        if (!doc) {
-            continue;
-        }
-        if (doc.querySelector("#game-text-display")) {
-            storyFrameCache = { frame };
-            return doc;
-        }
-    }
-    return null;
-}
-
-function getStoryImageMap() {
-    const store = chat_metadata?.[STORY_IMAGE_META_KEY];
-    return store && typeof store === "object" ? store : {};
-}
-
-function lookupStoryImageUrl(key) {
-    if (!key) {
-        return "";
-    }
-    const map = getStoryImageMap();
-    const exact = map[key];
-    if (exact?.url) {
-        return String(exact.url);
-    }
-
-    // 兜底：长度只差一两个字符时按最近一条匹配（极少数渲染差异）。
-    // 容差刻意压到 2：指纹已经剥离空白，再放宽就容易把上一回合的图错挂到本回合。
-    const targetLen = Number(String(key).split("-")[0]) || 0;
-    if (!targetLen) {
-        return "";
-    }
-    const candidates = Object.entries(map)
-        .map(([k, v]) => ({ url: String(v?.url || ""), at: Number(v?.at) || 0, len: Number(String(k).split("-")[0]) || 0 }))
-        .filter((item) => item.url && Math.abs(item.len - targetLen) <= 2)
-        .sort((a, b) => b.at - a.at);
-
-    return candidates[0]?.url || "";
-}
-
-function ensureStoryHolder(doc, display, url) {
-    let holder = doc.getElementById(STORY_IMAGE_DOM_ID);
-    if (!holder) {
-        holder = doc.createElement("div");
-        holder.id = STORY_IMAGE_DOM_ID;
-        holder.style.cssText = "margin:10px 0;";
-    }
-
-    const img = holder.querySelector("img");
-    if (!img || img.getAttribute("src") !== url) {
-        holder.replaceChildren();
-        const next = doc.createElement("img");
-        next.src = url;
-        next.loading = "lazy";
-        next.decoding = "async";
-        next.alt = "本回合配图";
-        next.title = "点击查看原图";
-        next.style.cssText = "max-width:100%;border-radius:8px;border:1px solid rgba(var(--rgb-secondary,120,140,200),0.35);cursor:zoom-in;display:block;";
-        next.addEventListener("click", () => window.open(url, "_blank"));
-        holder.appendChild(next);
-    }
-
-    if (holder.parentElement !== display) {
-        display.appendChild(holder);
-    }
-    return holder;
-}
-
-function syncStoryImage(reason = "") {
-    const settings = extension_settings[extensionName];
-    const doc = findStoryDocument();
-    if (!doc) {
-        return;
-    }
-
-    const display = doc.querySelector("#game-text-display");
-    if (!display) {
-        return;
-    }
-
-    attachStoryObserver(doc, display);
-
-    const holder = doc.getElementById(STORY_IMAGE_DOM_ID);
-    if (!settings?.persistStoryImage) {
-        holder?.remove();
-        return;
-    }
-
-    // 角色卡自己已经把本回合的图挂出来了（刚生成那一次），不再叠一张。
-    if (display.querySelector("#story-image-slot img")) {
-        holder?.remove();
-        return;
-    }
-
-    const text = display.textContent || "";
-    storyLastLen = text.length;
-
-    const url = lookupStoryImageUrl(storyFingerprint(text));
-    if (!url) {
-        holder?.remove();
-        return;
-    }
-
-    ensureStoryHolder(doc, display, url);
-}
-
-function scheduleStoryImageSync(reason) {
-    if (storySyncPending) {
-        return;
-    }
-    storySyncPending = true;
-    clearTimeout(storySyncTimer);
-    storySyncTimer = setTimeout(() => {
-        storySyncPending = false;
-        if (document.visibilityState === "hidden") {
-            return;
-        }
-        try {
-            syncStoryImage(reason);
-        } catch (error) {
-            console.warn(`[${extensionName}] 配图同步失败`, error);
-        }
-    }, STORY_SYNC_THROTTLE_MS);
-}
-
-function attachStoryObserver(doc, display) {
-    if (storyObserver && storyObservedDoc === doc && storyObservedDisplay === display) {
-        return;
-    }
-    storyObserver?.disconnect();
-    storyObservedDoc = doc;
-    storyObservedDisplay = display;
-    storyObserver = new MutationObserver(() => scheduleStoryImageSync("mutation"));
-    // 只盯直接子节点：角色卡重绘正文区时必然动这一层，开销最小。
-    storyObserver.observe(display, { childList: true });
-}
-
-function scheduleStoryChatSave() {
-    clearTimeout(storyChatSaveTimer);
-    storyChatSaveTimer = setTimeout(() => {
-        saveChatConditional().catch((error) => {
-            console.warn(`[${extensionName}] 保存聊天失败`, error);
-        });
-    }, 800);
-}
-
-// 把刚生成的图落成服务器文件，只在聊天元数据里记 URL，避免存档被 base64 撑大。
-async function persistStoryImage(imageData, prompt) {
-    const settings = extension_settings[extensionName];
-    if (!settings?.persistStoryImage) {
-        return;
-    }
-
-    const context = getContext();
-    if (!context?.chatId) {
-        // 没有聊天上下文时无处挂载，直接跳过。
-        return;
-    }
-
-    const doc = findStoryDocument();
-    const display = doc?.querySelector("#game-text-display");
-    const key = display ? storyFingerprint(display.textContent) : "";
-
-    let url = "";
-    try {
-        const raw = String(imageData).replace(/^data:[^;]+;base64,/, "");
-        const charName = context.characters?.[context.characterId]?.name || "oair";
-        url = await saveBase64AsFile(raw, charName, `oair-${Date.now()}`, "jpg");
-    } catch (error) {
-        console.warn(`[${extensionName}] 配图落盘失败，本次不持久化`, error);
-        return;
-    }
-
-    if (!url) {
-        return;
-    }
-
-    const map = getStoryImageMap();
-    map[key || `t-${Date.now()}`] = {
-        url,
-        at: Date.now(),
-        prompt: String(prompt || "").slice(0, 400),
-    };
-
-    // 只保留最近 N 条，防止元数据无限膨胀。
-    const trimmed = Object.fromEntries(
-        Object.entries(map)
-            .sort((a, b) => (Number(b[1]?.at) || 0) - (Number(a[1]?.at) || 0))
-            .slice(0, STORY_IMAGE_MAX_ENTRIES),
-    );
-    chat_metadata[STORY_IMAGE_META_KEY] = trimmed;
-
-    scheduleStoryChatSave();
-    scheduleStoryImageSync("persisted");
-    console.info(`[${extensionName}] 配图已持久化: ${url}`);
-}
-
 async function onExternalImageRequest(payload) {
     const request = normalizeExternalImageRequest(payload);
     if (!request) {
@@ -876,11 +587,6 @@ async function onExternalImageRequest(payload) {
         });
         console.info(`[${extensionName}] image response sent for ${request.id} (${image.length} chars)`);
         setStatus(`外部生图完成：${request.id}`, "success");
-
-        // 不阻塞响应：先把图交回前端，再异步落盘。
-        persistStoryImage(image, request.prompt).catch((error) => {
-            console.warn(`[${extensionName}] 配图持久化异常`, error);
-        });
     } catch (error) {
         const message = error?.message || String(error);
         console.error(`[${extensionName}] External image request failed`, error);

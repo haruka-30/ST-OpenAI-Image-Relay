@@ -97,32 +97,6 @@ eventOn("generate-image-response", (data) => {
 
 
 
-### 正文配图持久化
-
-角色卡「诡秘之主：第五纪」把正文配图放在 `storyImageState` 里，源码注释写明「仅内存，不持久化」——刷新页面、切到下一回合再回来都看不到。
-
-扩展补了一层持久化（设置里「正文配图持久化」，默认开启）：
-
-1. 生图成功后，图片通过 `/api/images/upload` 落成服务器文件，返回 `/user/images/<角色名>/oair-*.jpg`。
-2. 聊天元数据 `chat_metadata["ST-OpenAI-Image-Relay-story-images"]` 里按「正文指纹」记一条 `{ url, at, prompt }`。
-3. 重新进入或翻回某个回合时，扩展算出当前正文的指纹，命中就把图挂回正文区（`#game-text-display` 内的 `#oair-story-image`），点击可看原图。
-
-设计要点：
-
-| 点 | 做法 | 原因 |
-|---|---|---|
-| 锚点 | 正文指纹 = 去空白后的长度 + 首尾采样哈希 | 不依赖角色卡内部数据结构；剥离空白是因为重渲染时会差一两个换行 |
-| 存储 | 只存 URL，不存 base64 | 一张 1024×1024 JPEG 的 base64 约 450 KB，直接塞进聊天会让存档迅速膨胀 |
-| 上限 | 元数据保留最近 60 条 | 防止无限增长 |
-| 触发 | `CHAT_CHANGED`、`CHARACTER_MESSAGE_RENDERED`、正文区 `MutationObserver`、5 秒兜底轮询 | 角色卡内部换回合不一定改 DOM 结构，光靠观察器会漏 |
-| 开销 | 观察器只盯 `childList`，同步做 400ms 节流，页面隐藏时跳过 | 正文区可能有几千字，避免频繁全量读取 |
-
-如果角色卡自己已经把图挂出来了（`#story-image-slot img` 存在），扩展不会重复叠加。
-
-图片文件位于 `data/<user>/user/images/<角色名>/`，同一回合重新生图会生成新文件，旧文件不会自动删除，需要时手动清理。
-
-
-
 ### 关于进度条步数
 
 local-dream 的 `Pipeline::generate()` 里写死了：
